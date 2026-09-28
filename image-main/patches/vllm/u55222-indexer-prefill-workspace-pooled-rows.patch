@@ -1,0 +1,53 @@
+diff --git a/vllm/models/glm5next/common/attention.py b/vllm/models/glm5next/common/attention.py
+index 25f5111..0a08a98 100644
+--- a/vllm/models/glm5next/common/attention.py
++++ b/vllm/models/glm5next/common/attention.py
+@@ -312,7 +312,11 @@ class Indexer(nn.Module):
+         self.prefix = prefix
+         from vllm.v1.attention.backends.mla.indexer import get_max_prefill_buffer_size
+ 
+-        self.max_total_seq_len = get_max_prefill_buffer_size(vllm_config)
++        # u55222 (vllm #55222, workspace half): the kpool index cache holds one row per index_kpool tokens,
++        # so the prefill K-gather workspace is sized in pooled rows, not tokens.
++        self.max_total_seq_len = (
++            get_max_prefill_buffer_size(vllm_config) // self.index_kpool
++        )
+         self.indexer_op = SparseAttnIndexerKpool(
+             self.k_cache,
+             self.quant_block_size,
+diff --git a/vllm/v1/attention/backends/mla/indexer.py b/vllm/v1/attention/backends/mla/indexer.py
+index e7eb67b..bf8f918 100644
+--- a/vllm/v1/attention/backends/mla/indexer.py
++++ b/vllm/v1/attention/backends/mla/indexer.py
+@@ -880,7 +880,15 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
+         self.pcp_rank = get_pcp_group().rank_in_group if self.use_pcp else 0
+         self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
+         # NOTE(Chen):an estimated max size of flattened_kv. Need to double check.
+-        self.max_prefill_buffer_size = get_max_prefill_buffer_size(self.vllm_config)
++        # KV compression (DeepseekV4; GLM-5.3-Flash kpool via tokens_per_state). Default to 1 for no compression.
++        self.compress_ratio = 1
++        if isinstance(self.kv_cache_spec, MLAAttentionSpec):
++            assert isinstance(self.kv_cache_spec.tokens_per_state, int)
++            self.compress_ratio = self.kv_cache_spec.tokens_per_state
++        # u55222 (vllm #55222): in compressed rows, like the chunker's seq_lens and the K-gather workspace.
++        self.max_prefill_buffer_size = (
++            get_max_prefill_buffer_size(self.vllm_config) // self.compress_ratio
++        )
+         self.num_speculative_tokens = (
+             self.vllm_config.speculative_config.num_speculative_tokens
+             if self.vllm_config.speculative_config
+@@ -962,14 +970,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
+             (self.num_sms + 1, 2), dtype=torch.int32, device=self.device
+         )
+ 
+-        # KV compression. Default to 1 for no compression.
+-        self.compress_ratio = 1
+-        # Get compress_ratio for DeepseekV4 support
+-        if isinstance(self.kv_cache_spec, MLAAttentionSpec):
+-            # MLA compression is a whole number of tokens per state (fractions
+-            # are whisper block pooling and never reach MLA).
+-            assert isinstance(self.kv_cache_spec.tokens_per_state, int)
+-            self.compress_ratio = self.kv_cache_spec.tokens_per_state
+         if self.dcp_world_size > 1 and self.compress_ratio > 1:
+             raise NotImplementedError(
+                 "DCP is not supported with sparse indexer KV compression "
