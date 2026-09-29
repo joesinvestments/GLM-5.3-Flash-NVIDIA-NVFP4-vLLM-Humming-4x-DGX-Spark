@@ -12,7 +12,7 @@ This is the exact build we serve: `image-main/build.sh` refuses to build unless 
 
 ## Results (2026-09-28)
 
-All numbers are from the production cluster, measured on the day.
+All numbers are from the production cluster, measured on the day. Load and long-reply numbers were measured with thinking at max, the heaviest setting; the recommended client setting is high (finding 6).
 
 | What | How it was measured | Result |
 |---|---|---|
@@ -65,6 +65,17 @@ Measured on this stack with the Red Hat checkpoint. The sparse indexer's prefill
 
 Right after the runs above, three more 8-session sweeps on the NVIDIA checkpoint read 63.1 / 78.9 / 86.0 tok/s at a 0.96 hit rate, only because the prompts were already cached. Compare throughput only between runs with similar hit rates; `agent_sessions_long.py` reports the hit rate for every level.
 
+### 6. Send reasoning effort high, not max
+
+The chat template knows two efforts, `low` and `high`. Any other value, and a request that sends none, renders as `Reasoning Effort: Max`. At max the model plans a whole multi-step agent task inside its thinking before its first tool call. Measured on this stack on 2026-09-28, one real agent request (a 34K-token agent harness prompt with 38 tools and a five-step coding task), replayed with streaming and a 12,000-token cap:
+
+| `reasoning_effort` | Thinking before the first tool call | First tool call |
+|---|---|---|
+| max | over 12,000 tokens, hit the cap still planning | none after 256 s |
+| high | 63 tokens | 16 s |
+
+In a desktop agent client the same task at max ran 11 minutes with no visible action (the server generated 15,786 tokens in the last 6 of them alone), and the client reported a dropped stream while the server was still generating. High is our standard for every client. The numbers in Results were measured at max, the heaviest setting, and the measurement tools still send max on purpose.
+
 ## Open questions
 
 - **Is the NVIDIA checkpoint really faster at 8 sessions?** One run of 3 sweeps each: 54.9 against 52.8 tok/s, inside the spread. The acceptance gain is consistent; the throughput gain needs more sweeps.
@@ -108,7 +119,7 @@ Download once and copy node to node over the fast link rather than downloading f
 ```bash
 cp template/chat_template_zai0907_optout.jinja "$HF_ROOT/hub/nvidia-glm53-flash-nvfp4/"
 ```
-The launcher passes it with `--chat-template` and refuses to start without it. It is Z.ai's official 09-07 template plus one explicit opt-out line: every request reasons unless it sends `"chat_template_kwargs": {"enable_thinking": false}`. With thinking on, it renders byte for byte like the official template.
+The launcher passes it with `--chat-template` and refuses to start without it. It is Z.ai's official 09-07 template plus one explicit opt-out line: every request reasons unless it sends `"chat_template_kwargs": {"enable_thinking": false}`. With thinking on, it renders byte for byte like the official template. Have your clients send `"reasoning_effort": "high"`: the template falls back to Max when a request sends nothing (finding 6).
 
 **4. Launch, workers first, head last:**
 ```bash
